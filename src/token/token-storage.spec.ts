@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -7,11 +7,19 @@ import { promises as fs } from 'node:fs';
 import { TokenStorage } from './token-storage';
 import { hashToken } from './hash-token';
 
+const dbDirs = new Set<string>();
+
 const freshDbPath = async () => {
   const dir = join(tmpdir(), `nx-cache-token-db-${randomUUID()}`);
   await fs.mkdir(dir, { recursive: true });
+  dbDirs.add(dir);
   return join(dir, 'tokens.sqlite');
 };
+
+afterEach(async () => {
+  await Promise.all([...dbDirs].map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  dbDirs.clear();
+});
 
 const readStoredValue = (dbPath: string, id: string) => {
   const db = new Database(dbPath, { strict: true });
@@ -92,10 +100,47 @@ describe('TokenStorage', () => {
     expect(readStoredValue(dbPath, 'legacy')).not.toBe('plaintext-token');
   });
 
-  it('checks sqlite readiness with a simple query', async () => {
+  it("migrates when one plaintext token equals another token's hash", async () => {
+    const dbPath = await freshDbPath();
+    const hashLookingToken = hashToken('a');
+    const legacy = new Database(dbPath, { create: true, strict: true });
+    legacy.run(`
+      CREATE TABLE IF NOT EXISTS tokens (
+        id TEXT NOT NULL UNIQUE,
+        value TEXT PRIMARY KEY,
+        permission TEXT NOT NULL CHECK (permission IN ('readonly', 'full'))
+      );
+    `);
+    const insert = legacy.query(
+      'INSERT INTO tokens (id, value, permission) VALUES ($id, $value, $permission)',
+    );
+    insert.run({ id: 'plain', value: 'a', permission: 'full' });
+    insert.run({ id: 'hash-looking', value: hashLookingToken, permission: 'readonly' });
+    legacy.close();
+
+    const storage = new TokenStorage(dbPath);
+
+    expect(storage.findToken('a')).toEqual({ id: 'plain', permission: 'full' });
+    expect(storage.findToken(hashLookingToken)).toEqual({
+      id: 'hash-looking',
+      permission: 'readonly',
+    });
+  });
+
+  it('checks readiness through the operational token columns', async () => {
     const dbPath = await freshDbPath();
     const storage = new TokenStorage(dbPath);
 
     await expect(storage.checkReady()).resolves.toBeUndefined();
+  });
+
+  it('fails readiness when the tokens table is unusable', async () => {
+    const dbPath = await freshDbPath();
+    const storage = new TokenStorage(dbPath);
+    const corruptor = new Database(dbPath, { strict: true });
+    corruptor.run('DROP TABLE tokens');
+    corruptor.close();
+
+    await expect(storage.checkReady()).rejects.toThrow();
   });
 });

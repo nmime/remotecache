@@ -29,6 +29,8 @@ const SHUTDOWN_DRAIN_TIMEOUT_MS = Number(Bun.env.SHUTDOWN_DRAIN_TIMEOUT_MS ?? '3
 const CACHE_MAX_BYTES = Bun.env.CACHE_MAX_BYTES ? Number(Bun.env.CACHE_MAX_BYTES) : undefined;
 const CACHE_TTL_HOURS = Bun.env.CACHE_TTL_HOURS ? Number(Bun.env.CACHE_TTL_HOURS) : undefined;
 const CACHE_SWEEP_INTERVAL_MS = Number(Bun.env.CACHE_SWEEP_INTERVAL_MS ?? '60000');
+const CACHE_TTL_MS = CACHE_TTL_HOURS !== undefined ? CACHE_TTL_HOURS * 3_600_000 : undefined;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function exitOnError(error: unknown): never {
   logger.error(error instanceof Error ? error.message : String(error));
@@ -42,16 +44,35 @@ function requirePositiveNumber(name: string, value: number): void {
   }
 }
 
-if (isNaN(PORT) || PORT <= 0 || PORT >= 65536) {
+function requirePositiveInteger(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    logger.error(`Error: ${name} environment variable must be a positive integer.`);
+    process.exit(1);
+  }
+}
+
+if (!Number.isInteger(PORT) || PORT <= 0 || PORT >= 65536) {
   logger.error('Error: PORT environment variable must be a valid port number.');
   process.exit(1);
 }
 
-requirePositiveNumber('MAX_UPLOAD_BYTES', MAX_UPLOAD_BYTES);
-requirePositiveNumber('SHUTDOWN_DRAIN_TIMEOUT_MS', SHUTDOWN_DRAIN_TIMEOUT_MS);
-if (CACHE_MAX_BYTES !== undefined) requirePositiveNumber('CACHE_MAX_BYTES', CACHE_MAX_BYTES);
+requirePositiveInteger('MAX_UPLOAD_BYTES', MAX_UPLOAD_BYTES);
+requirePositiveInteger('SHUTDOWN_DRAIN_TIMEOUT_MS', SHUTDOWN_DRAIN_TIMEOUT_MS);
+if (CACHE_MAX_BYTES !== undefined) requirePositiveInteger('CACHE_MAX_BYTES', CACHE_MAX_BYTES);
 if (CACHE_TTL_HOURS !== undefined) requirePositiveNumber('CACHE_TTL_HOURS', CACHE_TTL_HOURS);
-requirePositiveNumber('CACHE_SWEEP_INTERVAL_MS', CACHE_SWEEP_INTERVAL_MS);
+requirePositiveInteger('CACHE_SWEEP_INTERVAL_MS', CACHE_SWEEP_INTERVAL_MS);
+if (CACHE_TTL_MS !== undefined && !Number.isFinite(CACHE_TTL_MS)) {
+  logger.error(
+    'Error: CACHE_TTL_HOURS environment variable is too large to convert to milliseconds.',
+  );
+  process.exit(1);
+}
+if (CACHE_SWEEP_INTERVAL_MS > MAX_TIMER_DELAY_MS) {
+  logger.error(
+    `Error: CACHE_SWEEP_INTERVAL_MS environment variable must not exceed ${MAX_TIMER_DELAY_MS}.`,
+  );
+  process.exit(1);
+}
 
 if (!ADMIN_TOKEN) {
   logger.error('Error: ADMIN_TOKEN environment variable must be set.');
@@ -92,7 +113,7 @@ if (evictionEnabled) {
   evictor = createCacheEvictor({
     cacheDir: storage.cacheDir,
     maxBytes: CACHE_MAX_BYTES,
-    ttlMs: CACHE_TTL_HOURS !== undefined ? CACHE_TTL_HOURS * 3_600_000 : undefined,
+    ttlMs: CACHE_TTL_MS,
     intervalMs: CACHE_SWEEP_INTERVAL_MS,
     onSweep: (result) => metrics.recordSweep(result),
   });
