@@ -45,6 +45,7 @@ Docs are part of the change, not a follow-up: any change to behavior, the HTTP A
 
 ## Workflow
 
+- Never commit Superpowers-generated specs, plans, or reviews. The repository-root `docs/` directory is ignored for local-only agent artifacts; product documentation belongs in `docs-site/`.
 - Unit tests colocate beside their source as `*.spec.ts`; end-to-end tests live under `e2e/`.
 - Commits follow Conventional Commits (`type(scope): subject`).
 - PR CI runs format-check, lint, typecheck, audits, tests, docs build, Docker smoke, Helm lint/template, kubeconform, kind install plus `helm test`, S3 MinIO e2e, Trivy filesystem scan, and CodeQL; see `CONTRIBUTING.md` for local commands. The Helm chart lives in `charts/remotecache/`. Pushing to `main` runs the Docker publish workflow after its preflight gate and publishes GHCR image tags `:edge` + `:sha-<short>`.
