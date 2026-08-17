@@ -14,6 +14,7 @@ The self-hosted Nx remote cache server reads all configuration from environment 
 | `TOKENS_DB_PATH`            | no       | `./data/nx-cache-server-tokens.sqlite` | SQLite token DB path. Persist this in production.                                                                                               |
 | `MAX_UPLOAD_BYTES`          | no       | `524288000` (500 MiB)                  | Upload size cap for `PUT`; over the limit returns `413`.                                                                                        |
 | `SHUTDOWN_DRAIN_TIMEOUT_MS` | no       | `30000`                                | Max wait for in-flight requests on `SIGTERM`/`SIGINT` before the server exits anyway.                                                           |
+| `HTTP_IDLE_TIMEOUT_SECONDS` | no       | `60`                                   | Maximum idle HTTP connection time. Raise it for slow S3-compatible backends so reads are not closed mid-response.                                |
 | `STORAGE_STRATEGY`          | no       | filesystem                             | `filesystem` or `s3`. Any other value refuses to start.                                                                                         |
 | `CACHE_DIR`                 | no       | `./cache`                              | Filesystem cache directory (filesystem strategy).                                                                                               |
 | `CACHE_MAX_BYTES`           | no       | —                                      | Opt-in size cap for the filesystem cache; a background sweep evicts least-recently-used entries until the cache fits. Filesystem strategy only. |
@@ -53,6 +54,8 @@ Set the two static keys together or not at all: providing only one fails fast at
 `MAX_UPLOAD_BYTES` caps `PUT /v1/cache/:hash` uploads. Anything over the limit returns `413` before
 the body hits storage. The server sizes its HTTP request-body limit from this value, so caps above
 Bun's 128 MiB default work as configured.
+
+`HTTP_IDLE_TIMEOUT_SECONDS` controls Bun's HTTP connection idle timeout. The default is deliberately above Bun's 10-second default so a transiently slow S3-compatible read does not become a proxy `502`; keep it finite to prevent idle clients from holding connections indefinitely.
 
 `BIND_ADDRESS` sets the listen interface (`0.0.0.0` by default; `::` for IPv6). On `SIGTERM`/`SIGINT`, the server stops accepting new requests and drains in-flight requests before exiting. Kubernetes pod termination and `docker stop` both use that path. The Helm chart uses `Recreate`, so upgrades can still have a brief availability gap. The drain is bounded by `SHUTDOWN_DRAIN_TIMEOUT_MS` (default 30 s), so a stalled client cannot hold the process open indefinitely.
 

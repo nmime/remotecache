@@ -74,4 +74,27 @@ describe('startup validation e2e', () => {
     expect(exitCode).toBe(1);
     expect(stderr).toContain('lifecycle rules');
   });
+
+  it('refuses a non-positive HTTP idle timeout', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-startup-'));
+    const proc = Bun.spawn(['bun', 'src/main.ts'], {
+      env: {
+        ...baseEnv(),
+        ADMIN_TOKEN: 'e2e-admin-token-0123456789abcdef',
+        PORT: '4014',
+        HTTP_IDLE_TIMEOUT_SECONDS: '0',
+        CACHE_DIR: join(dir, 'cache'),
+        TOKENS_DB_PATH: join(dir, 'tokens.sqlite'),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    const exitCode = await proc.exited;
+    const stderr = await new Response(proc.stderr).text();
+    rmSync(dir, { recursive: true, force: true });
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('HTTP_IDLE_TIMEOUT_SECONDS');
+  });
 });

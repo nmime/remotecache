@@ -25,6 +25,10 @@ const HOSTNAME = Bun.env.BIND_ADDRESS ?? '0.0.0.0';
 const TOKENS_DB_PATH = Bun.env.TOKENS_DB_PATH;
 const MAX_UPLOAD_BYTES = Number(Bun.env.MAX_UPLOAD_BYTES ?? '524288000');
 const SHUTDOWN_DRAIN_TIMEOUT_MS = Number(Bun.env.SHUTDOWN_DRAIN_TIMEOUT_MS ?? '30000');
+// Bun closes an HTTP connection after ten seconds unless this is raised. S3
+// reads can legitimately take longer than that during a backend tail-latency
+// spike, and an abrupt close becomes a 502 at an otherwise healthy proxy.
+const HTTP_IDLE_TIMEOUT_SECONDS = Number(Bun.env.HTTP_IDLE_TIMEOUT_SECONDS ?? '60');
 const CACHE_MAX_BYTES = Bun.env.CACHE_MAX_BYTES ? Number(Bun.env.CACHE_MAX_BYTES) : undefined;
 const CACHE_TTL_HOURS = Bun.env.CACHE_TTL_HOURS ? Number(Bun.env.CACHE_TTL_HOURS) : undefined;
 const CACHE_SWEEP_INTERVAL_MS = Number(Bun.env.CACHE_SWEEP_INTERVAL_MS ?? '60000');
@@ -48,6 +52,7 @@ if (isNaN(PORT) || PORT <= 0 || PORT >= 65536) {
 
 requirePositiveNumber('MAX_UPLOAD_BYTES', MAX_UPLOAD_BYTES);
 requirePositiveNumber('SHUTDOWN_DRAIN_TIMEOUT_MS', SHUTDOWN_DRAIN_TIMEOUT_MS);
+requirePositiveNumber('HTTP_IDLE_TIMEOUT_SECONDS', HTTP_IDLE_TIMEOUT_SECONDS);
 if (CACHE_MAX_BYTES !== undefined) requirePositiveNumber('CACHE_MAX_BYTES', CACHE_MAX_BYTES);
 if (CACHE_TTL_HOURS !== undefined) requirePositiveNumber('CACHE_TTL_HOURS', CACHE_TTL_HOURS);
 requirePositiveNumber('CACHE_SWEEP_INTERVAL_MS', CACHE_SWEEP_INTERVAL_MS);
@@ -162,6 +167,7 @@ export const server = Bun.serve({
   // +1 keeps writeCache's own 413 (with the documented message) authoritative
   // at the boundary; Bun still backstops anything larger.
   maxRequestBodySize: MAX_UPLOAD_BYTES + 1,
+  idleTimeout: HTTP_IDLE_TIMEOUT_SECONDS,
   ...(tls ? { tls } : {}),
   routes: {
     '/health': {
