@@ -222,7 +222,7 @@ describe('writeCache', () => {
     expect(body.locked).toBe(false);
   });
 
-  it('preserves success when a Bun-like reader rejects explicit release', async () => {
+  it('does not depend on an explicit source-reader release', async () => {
     const cacheFile = makeCacheFile();
     cacheFile.exists.mockResolvedValue(false);
     cacheFile.writeStream.mockImplementation(async (stream) => {
@@ -248,7 +248,8 @@ describe('writeCache', () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('');
-    expect(releaseAttempts).toBe(1);
+    expect(releaseAttempts).toBe(0);
+    expect(body.locked).toBe(false);
   });
 
   it('cancels and releases the source when storage rejects the write', async () => {
@@ -277,7 +278,7 @@ describe('writeCache', () => {
     expect(body.locked).toBe(false);
   });
 
-  it('cancels and releases the source when storage loses a first-writer race', async () => {
+  it('starts cancellation promptly when storage loses a first-writer race', async () => {
     const cacheFile = makeCacheFile();
     cacheFile.exists.mockResolvedValue(false);
     cacheFile.writeStream.mockRejectedValue(new CacheEntryExistsError('racehash'));
@@ -305,12 +306,13 @@ describe('writeCache', () => {
     const sourceUnlockedBeforeSettlement = !body.locked;
     releaseCancellation();
     const response = await responsePromise;
+    await Bun.sleep(0);
 
     expect(promptResult).not.toBe(timeout);
     expect(response.status).toBe(409);
     expect(await response.text()).toBe('Cannot override an existing record');
     expect(cancellationStartedBeforeSettlement).toBe(true);
-    expect(sourceUnlockedBeforeSettlement).toBe(true);
+    expect(sourceUnlockedBeforeSettlement).toBe(false);
     expect(body.locked).toBe(false);
   });
 });
