@@ -158,6 +158,10 @@ export class S3Strategy implements CacheStorageStrategy {
     // failures as soft (the client falls back to a cache miss).
     const response = await fetch(client.presign(hash, { method: 'PUT' }), {
       method: 'PUT',
+      // Disable pooling before the upload starts. Connection: close alone is a
+      // response-time hint; if the client disconnects first, Bun can otherwise
+      // leave the interrupted socket in the shared origin pool.
+      keepalive: false,
       headers: {
         // Bun can retain an unusable pooled connection after a streamed PUT is
         // aborted. Isolate uploads so a canceled CI job cannot poison later
