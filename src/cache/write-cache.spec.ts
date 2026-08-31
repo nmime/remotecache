@@ -268,6 +268,7 @@ describe('writeCache', () => {
     });
 
     const response = await writeCache(cacheFile, 'full', body, '7', maxUploadBytes);
+    await Bun.sleep(0);
 
     expect(cacheFile.exists).toHaveBeenCalled();
     expect(cacheFile.writeStream).toHaveBeenCalled();
