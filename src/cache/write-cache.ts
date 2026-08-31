@@ -132,11 +132,15 @@ export async function writeCache(
     await Bun.sleep(0);
     return okResponse({ message: null });
   } catch (error) {
-    cancelCountedStream();
+    const cancellation = cancelCountedStream();
+    const failure = error;
     // Let standard stream cancellation reach the request body before returning,
     // without waiting for a slow or stuck source cancel callback to settle.
-    await Promise.resolve();
-    const failure = error;
+    if (failure instanceof ClientDisconnectedError) {
+      await Promise.race([cancellation ?? Promise.resolve(), Bun.sleep(0)]);
+    } else {
+      await Promise.resolve();
+    }
     if (failure instanceof CacheEntryExistsError) {
       return conflictError('Cannot override an existing record');
     }
