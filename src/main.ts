@@ -173,7 +173,16 @@ const waitForRequestsToDrain = (): Promise<void> =>
 
 function trackRequest<T>(handler: () => T | Promise<T>): Promise<T> {
   activeRequests++;
-  return Promise.resolve().then(handler).finally(requestFinished);
+  // Invoke the route handler before returning to Bun. Deferring it through a
+  // resolved promise detaches request.body from the native route callback;
+  // slow streaming backends can then commit the object while Bun keeps the
+  // client response open waiting for the request-body pipe to settle.
+  try {
+    return Promise.resolve(handler()).finally(requestFinished);
+  } catch (error) {
+    requestFinished();
+    return Promise.reject(error);
+  }
 }
 
 export const server = Bun.serve({
@@ -196,17 +205,27 @@ export const server = Bun.serve({
       GET: () => trackRequest(() => getMetrics(metrics)),
     },
     '/v1/cache/:hash': {
-      GET: ({ params, headers }) =>
-        trackRequest(async () => {
+      GET: async ({ params, headers }) => {
+        // Cache reads return a streamed Response, so keep the response body in
+        // Bun's native route callback just like uploads below.
+        activeRequests++;
+        try {
           const tokenPermission = getTokenPermission(headers);
           const cacheFile = getCacheFile(params.hash);
 
           const response = await getCache(cacheFile, tokenPermission);
           metrics.recordCacheRequest('GET', response.status);
           return response;
-        }),
-      PUT: ({ headers, params, body }) =>
-        trackRequest(async () => {
+        } finally {
+          requestFinished();
+        }
+      },
+      PUT: async ({ headers, params, body, signal }) => {
+        // Keep Bun's native request body in this exact route callback. Wrapping
+        // the streaming handler in another promise can commit the S3 object but
+        // leave the client response open indefinitely.
+        activeRequests++;
+        try {
           const tokenPermission = getTokenPermission(headers);
           const cacheFile = getCacheFile(params.hash);
           const contentLength = headers.get('Content-Length') ?? '';
@@ -217,11 +236,15 @@ export const server = Bun.serve({
             body,
             contentLength,
             MAX_UPLOAD_BYTES,
+            signal,
           );
           const uploadedBytes = response.status === 200 ? Number(contentLength) || 0 : 0;
           metrics.recordCacheRequest('PUT', response.status, uploadedBytes);
           return response;
-        }),
+        } finally {
+          requestFinished();
+        }
+      },
     },
     '/v1/admin/tokens/:id': {
       DELETE: ({ params, headers }) =>
