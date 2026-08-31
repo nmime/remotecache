@@ -29,8 +29,11 @@ export async function getCache(
       return notFoundError('The record was not found');
     }
 
-    const message = await cacheFile.stream();
+    // Resolve metadata before opening the body stream. Issuing a second S3
+    // operation after creating an unread Bun S3 stream can leave that stream
+    // stalled against SeaweedFS.
     const contentLength = await cacheFile.size();
+    const message = await cacheFile.stream();
     return okResponse({ message, contentType: 'application/octet-stream', contentLength });
   } catch (error) {
     logger.error(error);

@@ -205,15 +205,21 @@ export const server = Bun.serve({
       GET: () => trackRequest(() => getMetrics(metrics)),
     },
     '/v1/cache/:hash': {
-      GET: ({ params, headers }) =>
-        trackRequest(async () => {
+      GET: async ({ params, headers }) => {
+        // Cache reads return a streamed Response, so keep the response body in
+        // Bun's native route callback just like uploads below.
+        activeRequests++;
+        try {
           const tokenPermission = getTokenPermission(headers);
           const cacheFile = getCacheFile(params.hash);
 
           const response = await getCache(cacheFile, tokenPermission);
           metrics.recordCacheRequest('GET', response.status);
           return response;
-        }),
+        } finally {
+          requestFinished();
+        }
+      },
       PUT: async ({ headers, params, body }) => {
         // Keep Bun's native request body in this exact route callback. Wrapping
         // the streaming handler in another promise can commit the S3 object but

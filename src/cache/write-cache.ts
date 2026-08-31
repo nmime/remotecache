@@ -107,6 +107,11 @@ export async function writeCache(
   try {
     await cacheFile.writeStream(countedStream, expectedLength);
     if (total !== expectedLength) throw new ContentLengthMismatchError();
+    await cancelCountedStream();
+    // Yield one Bun event-loop turn after the downstream fetch consumes the
+    // request stream. Returning the route response in the same turn can leave
+    // the client socket waiting even though the S3 object is already committed.
+    await Bun.sleep(0);
     return okResponse({ message: null });
   } catch (error) {
     cancelCountedStream();

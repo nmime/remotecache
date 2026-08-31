@@ -101,11 +101,18 @@ describe('getCache', () => {
 
   it('returns 200 with stream, content-type, and length when entry exists', async () => {
     const payload = 'hello world';
+    const readOrder: string[] = [];
     const cacheFile = makeCacheFile();
     cacheFile.valid.mockReturnValue(true);
     cacheFile.exists.mockResolvedValue(true);
-    cacheFile.stream.mockResolvedValue(new Response(payload).body as ReadableStream);
-    cacheFile.size.mockResolvedValue(payload.length);
+    cacheFile.stream.mockImplementation(async () => {
+      readOrder.push('stream');
+      return new Response(payload).body as ReadableStream;
+    });
+    cacheFile.size.mockImplementation(async () => {
+      readOrder.push('size');
+      return payload.length;
+    });
 
     const response = await getCache(cacheFile, 'full' as TokenPermission);
 
@@ -113,6 +120,7 @@ describe('getCache', () => {
     expect(cacheFile.exists).toHaveBeenCalled();
     expect(cacheFile.stream).toHaveBeenCalled();
     expect(cacheFile.size).toHaveBeenCalled();
+    expect(readOrder).toEqual(['size', 'stream']);
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('application/octet-stream');
     expect(response.headers.get('Content-Length')).toBe(String(payload.length));
