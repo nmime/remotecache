@@ -134,6 +134,21 @@ describe('S3Strategy', () => {
     expect(forwardedSignal).toBe(controller.signal);
   });
 
+  it('isolates each streamed upload from the fetch connection pool', async () => {
+    let forwardedHeaders: HeadersInit | undefined;
+    globalThis.fetch = Object.assign(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        forwardedHeaders = init?.headers;
+        return new Response(null, { status: 200 });
+      },
+      { preconnect: originalFetch.preconnect },
+    );
+
+    await createStrategy().writeStream('hash', new Blob(['data']).stream(), 4);
+
+    expect(new Headers(forwardedHeaders).get('Connection')).toBe('close');
+  });
+
   it('releases the S3 response reader after the streamed body reaches EOF', async () => {
     const source = new Blob(['payload']).stream();
     const getReader = source.getReader.bind(source);
