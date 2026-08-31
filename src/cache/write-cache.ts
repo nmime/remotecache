@@ -32,16 +32,7 @@ const toReadableStream = (
 class ContentLengthExceededError extends Error {}
 class ContentLengthMismatchError extends Error {}
 
-/**
- * Validates and streams one append-only cache upload.
- *
- * After acquiring the body reader, every terminal write result completes its
- * lifecycle. Explicit lock release is best-effort because Bun direct HTTP
- * readers can omit releaseLock or throw when it is called; those readers
- * complete through EOF or cancellation. Rejected writes initiate cancellation
- * without blocking the response, so unread or oversized sources finish cleanup
- * when their cancellation settles.
- */
+/** Validates and streams one append-only cache upload. */
 export async function writeCache(
   cacheFile: Pick<CacheFile, 'exists' | 'writeStream' | 'valid'>,
   tokenPermission: TokenPermission | null,
@@ -81,71 +72,60 @@ export async function writeCache(
   }
 
   let total = 0;
-  const reader = sourceStream.getReader();
-  let sourceReleased = false;
-  const releaseSource = () => {
-    if (sourceReleased) return;
-    sourceReleased = true;
-    try {
-      reader.releaseLock();
-    } catch {
-      // Bun direct HTTP readers complete through EOF/cancel even when their
-      // releaseLock method is missing or throws.
-    }
-  };
-  let sourceCancellation: Promise<void> | undefined;
-  const cancelSource = () => {
-    if (sourceReleased || sourceCancellation) return;
-    sourceCancellation = (async () => {
-      try {
-        await reader.cancel();
-      } catch {
-        // Preserve the original write failure and response mapping.
-      } finally {
-        releaseSource();
-      }
-    })();
-  };
-  const countedStream = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const { value, done } = await reader.read();
-      if (done) {
-        if (total !== expectedLength) {
-          controller.error(new ContentLengthMismatchError());
-          return;
-        }
-        controller.close();
-        return;
-      }
-      total += value.byteLength;
+  // Keep the request body on Bun's native pipe path. A hand-built ReadableStream
+  // around request.body is not consumed correctly when Bun fetch() forwards it
+  // to an S3-compatible backend, which makes valid uploads look truncated.
+  const counter = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      total += chunk.byteLength;
       if (total > expectedLength) {
-        controller.error(new ContentLengthExceededError());
-        return;
+        throw new ContentLengthExceededError();
       }
-      controller.enqueue(value);
+      controller.enqueue(chunk);
     },
-    cancel() {
-      cancelSource();
+    flush() {
+      if (total !== expectedLength) {
+        throw new ContentLengthMismatchError();
+      }
     },
   });
+  const countedStream = counter.readable;
+  let sourcePipeError: unknown;
+  const sourcePipe = sourceStream.pipeTo(counter.writable).catch((error: unknown) => {
+    sourcePipeError = error;
+  });
+  let cancellationStarted = false;
+  let cancellation: Promise<void> | undefined;
+  const cancelCountedStream = () => {
+    if (cancellationStarted || countedStream.locked) return cancellation;
+    cancellationStarted = true;
+    cancellation = countedStream.cancel().catch(() => {
+      // Preserve the original storage error and response mapping.
+    });
+    return cancellation;
+  };
 
   try {
     await cacheFile.writeStream(countedStream, expectedLength);
+    await sourcePipe;
+    if (sourcePipeError) throw sourcePipeError;
     return okResponse({ message: null });
   } catch (error) {
-    cancelSource();
-    if (error instanceof CacheEntryExistsError) {
+    cancelCountedStream();
+    // Let standard stream cancellation reach the request body before returning,
+    // without waiting for a slow or stuck source cancel callback to settle.
+    await Promise.resolve();
+    const failure = sourcePipeError ?? error;
+    if (failure instanceof CacheEntryExistsError) {
       return conflictError('Cannot override an existing record');
     }
     if (
-      error instanceof ContentLengthExceededError ||
-      error instanceof ContentLengthMismatchError
+      failure instanceof ContentLengthExceededError ||
+      failure instanceof ContentLengthMismatchError
     ) {
       return badRequest('Invalid Content-Length header');
     }
-    logger.error(error);
+    logger.error(failure);
     return internalServerError('Failed to write to cache');
-  } finally {
-    releaseSource();
   }
 }
