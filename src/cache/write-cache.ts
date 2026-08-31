@@ -89,11 +89,10 @@ export async function writeCache(
       }
     },
   });
-  const countedStream = counter.readable;
-  let sourcePipeError: unknown;
-  const sourcePipe = sourceStream.pipeTo(counter.writable).catch((error: unknown) => {
-    sourcePipeError = error;
-  });
+  // Keep request-body consumption in the downstream pull chain. Awaiting a
+  // separate pipeTo promise can stay pending after S3 has committed the object,
+  // leaving the client PUT open indefinitely on Bun.
+  const countedStream = sourceStream.pipeThrough(counter);
   let cancellationStarted = false;
   let cancellation: Promise<void> | undefined;
   const cancelCountedStream = () => {
@@ -107,15 +106,14 @@ export async function writeCache(
 
   try {
     await cacheFile.writeStream(countedStream, expectedLength);
-    await sourcePipe;
-    if (sourcePipeError) throw sourcePipeError;
+    if (total !== expectedLength) throw new ContentLengthMismatchError();
     return okResponse({ message: null });
   } catch (error) {
     cancelCountedStream();
     // Let standard stream cancellation reach the request body before returning,
     // without waiting for a slow or stuck source cancel callback to settle.
     await Promise.resolve();
-    const failure = sourcePipeError ?? error;
+    const failure = error;
     if (failure instanceof CacheEntryExistsError) {
       return conflictError('Cannot override an existing record');
     }

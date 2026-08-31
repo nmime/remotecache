@@ -214,8 +214,12 @@ export const server = Bun.serve({
           metrics.recordCacheRequest('GET', response.status);
           return response;
         }),
-      PUT: ({ headers, params, body }) =>
-        trackRequest(async () => {
+      PUT: async ({ headers, params, body }) => {
+        // Keep Bun's native request body in this exact route callback. Wrapping
+        // the streaming handler in another promise can commit the S3 object but
+        // leave the client response open indefinitely.
+        activeRequests++;
+        try {
           const tokenPermission = getTokenPermission(headers);
           const cacheFile = getCacheFile(params.hash);
           const contentLength = headers.get('Content-Length') ?? '';
@@ -230,7 +234,10 @@ export const server = Bun.serve({
           const uploadedBytes = response.status === 200 ? Number(contentLength) || 0 : 0;
           metrics.recordCacheRequest('PUT', response.status, uploadedBytes);
           return response;
-        }),
+        } finally {
+          requestFinished();
+        }
+      },
     },
     '/v1/admin/tokens/:id': {
       DELETE: ({ params, headers }) =>
