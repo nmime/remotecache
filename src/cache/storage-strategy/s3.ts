@@ -142,6 +142,10 @@ export class S3Strategy implements CacheStorageStrategy {
     const response = await fetch(client.presign(hash, { method: 'PUT' }), {
       method: 'PUT',
       headers: {
+        // Bun can retain an unusable pooled connection after a streamed PUT is
+        // aborted. Isolate uploads so a canceled CI job cannot poison later
+        // cache writes; the in-cluster TCP setup cost is negligible.
+        Connection: 'close',
         'Content-Length': String(contentLength),
         'If-None-Match': '*',
       },
