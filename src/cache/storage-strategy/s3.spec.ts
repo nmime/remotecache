@@ -3,19 +3,16 @@ import { S3Client } from 'bun';
 import { S3Strategy, shouldRefreshCredentials } from './s3';
 
 type S3ClientPrototype = {
-  exists(path: string, options?: Bun.S3Options): Promise<boolean>;
   file(path: string, options?: Bun.S3Options): Bun.S3File;
   list(input?: Bun.S3ListObjectsOptions | null): Promise<Bun.S3ListObjectsResponse>;
 };
 
 const s3Prototype = S3Client.prototype as unknown as S3ClientPrototype;
-const originalExists = s3Prototype.exists;
 const originalFile = s3Prototype.file;
 const originalList = s3Prototype.list;
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
-  s3Prototype.exists = originalExists;
   s3Prototype.file = originalFile;
   s3Prototype.list = originalList;
   globalThis.fetch = originalFetch;
@@ -51,7 +48,9 @@ describe('S3Strategy', () => {
   it('coalesces concurrent credential resolution', async () => {
     let providerCalls = 0;
     const { promise: credentialsGate, resolve: releaseCredentials } = Promise.withResolvers<void>();
-    s3Prototype.exists = () => Promise.resolve(false);
+    globalThis.fetch = Object.assign(async () => new Response('missing', { status: 404 }), {
+      preconnect: originalFetch.preconnect,
+    });
     const strategy = new S3Strategy({
       bucket: 'bucket',
       credentials: async () => {
@@ -75,7 +74,9 @@ describe('S3Strategy', () => {
 
   it('retries credential resolution after a provider failure', async () => {
     let providerCalls = 0;
-    s3Prototype.exists = () => Promise.resolve(true);
+    globalThis.fetch = Object.assign(async () => new Response('x', { status: 206 }), {
+      preconnect: originalFetch.preconnect,
+    });
     const strategy = new S3Strategy({
       bucket: 'bucket',
       credentials: async () => {
@@ -90,6 +91,42 @@ describe('S3Strategy', () => {
     await expect(strategy.exists('hash')).rejects.toThrow(/^STS unavailable$/);
     await expect(strategy.exists('hash')).resolves.toBe(true);
     expect(providerCalls).toBe(2);
+  });
+
+  it('uses a one-byte ranged GET for portable existence checks', async () => {
+    const requests: Array<{ method: string | undefined; range: string | null }> = [];
+    let call = 0;
+    globalThis.fetch = Object.assign(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        requests.push({
+          method: init?.method,
+          range: new Headers(init?.headers).get('Range'),
+        });
+        call++;
+        return call === 1
+          ? new Response('x', { status: 206 })
+          : new Response('missing', { status: 404 });
+      },
+      { preconnect: originalFetch.preconnect },
+    );
+
+    await expect(createStrategy().exists('present')).resolves.toBe(true);
+    await expect(createStrategy().exists('missing')).resolves.toBe(false);
+    expect(requests).toEqual([
+      { method: 'GET', range: 'bytes=0-0' },
+      { method: 'GET', range: 'bytes=0-0' },
+    ]);
+  });
+
+  it('surfaces unexpected existence-probe failures', async () => {
+    globalThis.fetch = Object.assign(
+      async () => new Response('backend unavailable', { status: 503 }),
+      { preconnect: originalFetch.preconnect },
+    );
+
+    await expect(createStrategy().exists('hash')).rejects.toThrow(
+      'S3 existence probe failed with HTTP 503: backend unavailable',
+    );
   });
 
   it('rejects writes when the backend does not support conditional writes', async () => {
@@ -176,7 +213,6 @@ describe('S3Strategy', () => {
 
   it('checks bucket readiness by listing at most one object', async () => {
     let listInput: Bun.S3ListObjectsOptions | null | undefined;
-    s3Prototype.exists = () => Promise.resolve(false);
     s3Prototype.list = (input) => {
       listInput = input;
       return Promise.resolve({});
@@ -188,7 +224,6 @@ describe('S3Strategy', () => {
   });
 
   it('fails readiness when the bucket list probe fails', async () => {
-    s3Prototype.exists = () => Promise.resolve(false);
     s3Prototype.list = () => Promise.reject(new Error('NoSuchBucket'));
 
     await expect(createStrategy().checkReady()).rejects.toThrow('NoSuchBucket');
