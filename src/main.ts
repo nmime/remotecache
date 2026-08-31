@@ -173,7 +173,16 @@ const waitForRequestsToDrain = (): Promise<void> =>
 
 function trackRequest<T>(handler: () => T | Promise<T>): Promise<T> {
   activeRequests++;
-  return Promise.resolve().then(handler).finally(requestFinished);
+  // Invoke the route handler before returning to Bun. Deferring it through a
+  // resolved promise detaches request.body from the native route callback;
+  // slow streaming backends can then commit the object while Bun keeps the
+  // client response open waiting for the request-body pipe to settle.
+  try {
+    return Promise.resolve(handler()).finally(requestFinished);
+  } catch (error) {
+    requestFinished();
+    return Promise.reject(error);
+  }
 }
 
 export const server = Bun.serve({
