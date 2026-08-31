@@ -7,6 +7,7 @@ export interface CacheStorageStrategy {
     hash: string,
     stream: ReadableStream<Uint8Array>,
     contentLength: number,
+    signal?: AbortSignal,
   ): Promise<void>;
   checkReady(): Promise<void>;
 }

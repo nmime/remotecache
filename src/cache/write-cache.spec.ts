@@ -255,7 +255,13 @@ describe('writeCache', () => {
   it('stops tracking an upload promptly when the client disconnects', async () => {
     const cacheFile = makeCacheFile();
     cacheFile.exists.mockResolvedValue(false);
-    cacheFile.writeStream.mockImplementation(() => new Promise(() => {}));
+    let storageSignal: AbortSignal | undefined;
+    cacheFile.writeStream.mockImplementation((_stream, _contentLength, signal) => {
+      storageSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
     const body = createStream('data');
     const controller = new AbortController();
 
@@ -267,6 +273,8 @@ describe('writeCache', () => {
       maxUploadBytes,
       controller.signal,
     );
+    await Bun.sleep(0);
+    expect(storageSignal).toBeDefined();
     controller.abort();
     const timeout = Symbol('timeout');
     const result = await Promise.race([responsePromise, Bun.sleep(100).then(() => timeout)]);
@@ -274,6 +282,7 @@ describe('writeCache', () => {
     expect(result).not.toBe(timeout);
     expect(result).toBeInstanceOf(Response);
     expect((result as Response).status).toBe(400);
+    expect(storageSignal?.aborted).toBe(true);
     expect(body.locked).toBe(false);
   });
 

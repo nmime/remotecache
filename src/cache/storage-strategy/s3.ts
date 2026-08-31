@@ -133,6 +133,7 @@ export class S3Strategy implements CacheStorageStrategy {
     hash: string,
     stream: ReadableStream<Uint8Array>,
     contentLength: number,
+    signal?: AbortSignal,
   ): Promise<void> {
     const client = await this.#getClient();
     // Single attempt, deliberately: the body is a one-shot stream, so a retry
@@ -145,6 +146,7 @@ export class S3Strategy implements CacheStorageStrategy {
         'If-None-Match': '*',
       },
       body: stream,
+      signal,
     });
 
     if (response.ok) {
