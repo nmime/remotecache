@@ -62,11 +62,11 @@ describe('cache concurrency e2e', () => {
 
   beforeAll(async () => {
     server = await spawnServer(PORT);
-  });
+  }, 15000);
 
   afterAll(async () => {
     await server?.stop();
-  });
+  }, 15000);
 
   it('resolves two concurrent uploads of one hash to a single 200 and a 409', async () => {
     const hash = 'concurrentputhash01';
