@@ -252,6 +252,31 @@ describe('writeCache', () => {
     expect(body.locked).toBe(false);
   });
 
+  it('stops tracking an upload promptly when the client disconnects', async () => {
+    const cacheFile = makeCacheFile();
+    cacheFile.exists.mockResolvedValue(false);
+    cacheFile.writeStream.mockImplementation(() => new Promise(() => {}));
+    const body = createStream('data');
+    const controller = new AbortController();
+
+    const responsePromise = writeCache(
+      cacheFile,
+      'full',
+      body,
+      '4',
+      maxUploadBytes,
+      controller.signal,
+    );
+    controller.abort();
+    const timeout = Symbol('timeout');
+    const result = await Promise.race([responsePromise, Bun.sleep(100).then(() => timeout)]);
+
+    expect(result).not.toBe(timeout);
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(400);
+    expect(body.locked).toBe(false);
+  });
+
   it('cancels and releases the source when storage rejects the write', async () => {
     const diskFullError = new Error('disk full');
     const cacheFile = makeCacheFile();

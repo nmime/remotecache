@@ -80,7 +80,49 @@ export class S3Strategy implements CacheStorageStrategy {
   }
 
   async getStream(hash: string): Promise<ReadableStream> {
-    return (await this.#getClient()).file(hash).stream();
+    const reader = (await this.#getClient()).file(hash).stream().getReader();
+    let readerReleased = false;
+    const releaseReader = () => {
+      if (readerReleased) return;
+      readerReleased = true;
+      reader.releaseLock();
+    };
+
+    let pendingRead: Awaited<ReturnType<typeof reader.read>> | undefined;
+    try {
+      // Prime the S3 request so an upstream read failure reaches getCache before
+      // it commits a 200 response, and so every response owns one explicit
+      // reader lifecycle.
+      pendingRead = await reader.read();
+    } catch (error) {
+      releaseReader();
+      throw error;
+    }
+
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const result = pendingRead ?? (await reader.read());
+          pendingRead = undefined;
+          if (result.done) {
+            releaseReader();
+            controller.close();
+            return;
+          }
+          controller.enqueue(result.value);
+        } catch (error) {
+          releaseReader();
+          throw error;
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          releaseReader();
+        }
+      },
+    });
   }
 
   async getSize(hash: string): Promise<number> {

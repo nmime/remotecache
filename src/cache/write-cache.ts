@@ -31,6 +31,7 @@ const toReadableStream = (
 
 class ContentLengthExceededError extends Error {}
 class ContentLengthMismatchError extends Error {}
+class ClientDisconnectedError extends Error {}
 
 /** Validates and streams one append-only cache upload. */
 export async function writeCache(
@@ -39,6 +40,7 @@ export async function writeCache(
   body: ReadableStream<Uint8Array> | Blob | null,
   headerContentLength: string,
   maxUploadBytes: number,
+  requestSignal?: AbortSignal,
 ) {
   const canWrite = tokenPermission === 'full';
 
@@ -89,9 +91,9 @@ export async function writeCache(
       }
     },
   });
-  // Keep request-body consumption in the downstream pull chain. Awaiting a
-  // separate pipeTo promise can stay pending after S3 has committed the object,
-  // leaving the client PUT open indefinitely on Bun.
+  // Keep request-body consumption in the downstream pull chain. A separately
+  // awaited pipeTo can remain pending after S3 commits and deadlock the client
+  // response. The route's AbortSignal below handles disconnects explicitly.
   const countedStream = sourceStream.pipeThrough(counter);
   let cancellationStarted = false;
   let cancellation: Promise<void> | undefined;
@@ -105,7 +107,23 @@ export async function writeCache(
   };
 
   try {
-    await cacheFile.writeStream(countedStream, expectedLength);
+    if (requestSignal?.aborted) throw new ClientDisconnectedError();
+    const storageWrite = cacheFile.writeStream(countedStream, expectedLength);
+    if (requestSignal) {
+      let rejectDisconnected: ((error: ClientDisconnectedError) => void) | undefined;
+      const disconnected = new Promise<never>((_resolve, reject) => {
+        rejectDisconnected = reject;
+      });
+      const onAbort = () => rejectDisconnected?.(new ClientDisconnectedError());
+      requestSignal.addEventListener('abort', onAbort, { once: true });
+      try {
+        await Promise.race([storageWrite, disconnected]);
+      } finally {
+        requestSignal.removeEventListener('abort', onAbort);
+      }
+    } else {
+      await storageWrite;
+    }
     if (total !== expectedLength) throw new ContentLengthMismatchError();
     await cancelCountedStream();
     // Yield one Bun event-loop turn after the downstream fetch consumes the
@@ -124,7 +142,8 @@ export async function writeCache(
     }
     if (
       failure instanceof ContentLengthExceededError ||
-      failure instanceof ContentLengthMismatchError
+      failure instanceof ContentLengthMismatchError ||
+      failure instanceof ClientDisconnectedError
     ) {
       return badRequest('Invalid Content-Length header');
     }

@@ -4,16 +4,19 @@ import { S3Strategy, shouldRefreshCredentials } from './s3';
 
 type S3ClientPrototype = {
   exists(path: string, options?: Bun.S3Options): Promise<boolean>;
+  file(path: string, options?: Bun.S3Options): Bun.S3File;
   list(input?: Bun.S3ListObjectsOptions | null): Promise<Bun.S3ListObjectsResponse>;
 };
 
 const s3Prototype = S3Client.prototype as unknown as S3ClientPrototype;
 const originalExists = s3Prototype.exists;
+const originalFile = s3Prototype.file;
 const originalList = s3Prototype.list;
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   s3Prototype.exists = originalExists;
+  s3Prototype.file = originalFile;
   s3Prototype.list = originalList;
   globalThis.fetch = originalFetch;
 });
@@ -98,6 +101,31 @@ describe('S3Strategy', () => {
     await expect(
       createStrategy().writeStream('hash', new Blob(['data']).stream(), 4),
     ).rejects.toThrow('does not support conditional writes');
+  });
+
+  it('releases the S3 response reader after the streamed body reaches EOF', async () => {
+    const source = new Blob(['payload']).stream();
+    const getReader = source.getReader.bind(source);
+    let releaseCalls = 0;
+    Object.defineProperty(source, 'getReader', {
+      value: () => {
+        const reader = getReader();
+        const releaseLock = reader.releaseLock.bind(reader);
+        Object.defineProperty(reader, 'releaseLock', {
+          value: () => {
+            releaseCalls++;
+            releaseLock();
+          },
+        });
+        return reader;
+      },
+    });
+    s3Prototype.file = () => ({ stream: () => source }) as Bun.S3File;
+
+    const stream = await createStrategy().getStream('hash');
+
+    expect(await new Response(stream).text()).toBe('payload');
+    expect(releaseCalls).toBe(1);
   });
 
   it('checks bucket readiness by listing at most one object', async () => {

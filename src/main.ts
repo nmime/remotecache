@@ -220,7 +220,7 @@ export const server = Bun.serve({
           requestFinished();
         }
       },
-      PUT: async ({ headers, params, body }) => {
+      PUT: async ({ headers, params, body, signal }) => {
         // Keep Bun's native request body in this exact route callback. Wrapping
         // the streaming handler in another promise can commit the S3 object but
         // leave the client response open indefinitely.
@@ -236,6 +236,7 @@ export const server = Bun.serve({
             body,
             contentLength,
             MAX_UPLOAD_BYTES,
+            signal,
           );
           const uploadedBytes = response.status === 200 ? Number(contentLength) || 0 : 0;
           metrics.recordCacheRequest('PUT', response.status, uploadedBytes);
