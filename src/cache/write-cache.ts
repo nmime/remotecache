@@ -105,17 +105,24 @@ export async function writeCache(
     });
     return cancellation;
   };
+  const storageAbort = new AbortController();
+  let storageWrite: Promise<void> | undefined;
 
   try {
     if (requestSignal?.aborted) throw new ClientDisconnectedError();
-    const storageWrite = cacheFile.writeStream(countedStream, expectedLength);
+    storageWrite = cacheFile.writeStream(countedStream, expectedLength, storageAbort.signal);
     if (requestSignal) {
       let rejectDisconnected: ((error: ClientDisconnectedError) => void) | undefined;
       const disconnected = new Promise<never>((_resolve, reject) => {
         rejectDisconnected = reject;
       });
-      const onAbort = () => rejectDisconnected?.(new ClientDisconnectedError());
+      const onAbort = () => {
+        const failure = new ClientDisconnectedError();
+        storageAbort.abort(failure);
+        rejectDisconnected?.(failure);
+      };
       requestSignal.addEventListener('abort', onAbort, { once: true });
+      if (requestSignal.aborted) onAbort();
       try {
         await Promise.race([storageWrite, disconnected]);
       } finally {
@@ -134,6 +141,10 @@ export async function writeCache(
   } catch (error) {
     const cancellation = cancelCountedStream();
     const failure = error;
+    if (failure instanceof ClientDisconnectedError) {
+      storageAbort.abort(failure);
+      await Promise.race([storageWrite?.catch(() => {}) ?? Promise.resolve(), Bun.sleep(100)]);
+    }
     // Let standard stream cancellation reach the request body before returning,
     // without waiting for a slow or stuck source cancel callback to settle.
     if (failure instanceof ClientDisconnectedError) {

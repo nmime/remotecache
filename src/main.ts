@@ -131,8 +131,8 @@ const getCacheFile = (hash: string): CacheFile => ({
   exists: () => storage.exists(hash),
   stream: () => storage.getStream(hash),
   size: () => storage.getSize(hash),
-  writeStream: (stream: ReadableStream<Uint8Array>, contentLength: number) =>
-    storage.writeStream(hash, stream, contentLength),
+  writeStream: (stream: ReadableStream<Uint8Array>, contentLength: number, signal?: AbortSignal) =>
+    storage.writeStream(hash, stream, contentLength, signal),
 });
 
 const isAdmin = (token: string) => safeEqual(token, ADMIN_TOKEN ?? '');

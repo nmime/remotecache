@@ -103,6 +103,37 @@ describe('S3Strategy', () => {
     ).rejects.toThrow('does not support conditional writes');
   });
 
+  it('forwards cancellation to the outbound S3 upload', async () => {
+    let forwardedSignal: AbortSignal | null | undefined;
+    globalThis.fetch = Object.assign(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        forwardedSignal = init?.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          if (init?.signal?.aborted) {
+            reject(init.signal.reason);
+            return;
+          }
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+      { preconnect: originalFetch.preconnect },
+    );
+    const controller = new AbortController();
+    const upload = createStrategy().writeStream(
+      'hash',
+      new Blob(['data']).stream(),
+      4,
+      controller.signal,
+    );
+
+    controller.abort(new Error('client disconnected'));
+
+    await expect(upload).rejects.toThrow('client disconnected');
+    expect(forwardedSignal).toBe(controller.signal);
+  });
+
   it('releases the S3 response reader after the streamed body reaches EOF', async () => {
     const source = new Blob(['payload']).stream();
     const getReader = source.getReader.bind(source);

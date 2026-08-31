@@ -212,5 +212,21 @@ describe.skipIf(!ENDPOINT)('s3 storage e2e (MinIO)', () => {
 
     const res = await fetch(`${server.baseUrl}/v1/cache/${hash}`, { headers: authHeaders });
     expect(res.status).toBe(404);
+
+    // Aborting the client must also abort the outbound S3 fetch. Otherwise the
+    // orphaned upload can consume Bun's connection pool and poison later jobs.
+    const recoveryHash = `s3afterabort${nonce}`;
+    const recoveryBody = new Uint8Array(1024).fill(7);
+    const timeout = Symbol('timeout');
+    const recovery = await Promise.race([
+      fetch(`${server.baseUrl}/v1/cache/${recoveryHash}`, {
+        method: 'PUT',
+        headers: authHeaders,
+        body: recoveryBody,
+      }),
+      Bun.sleep(5000).then(() => timeout),
+    ]);
+    expect(recovery).not.toBe(timeout);
+    expect((recovery as Response).status).toBe(200);
   }, 30000);
 });
