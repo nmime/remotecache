@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { S3Client } from 'bun';
-import { S3Strategy, shouldRefreshCredentials } from './s3';
+import { S3Strategy, shouldRefreshCredentials, type S3Upload } from './s3';
 
 type S3ClientPrototype = {
   file(path: string, options?: Bun.S3Options): Bun.S3File;
@@ -39,10 +39,11 @@ describe('shouldRefreshCredentials', () => {
 });
 
 describe('S3Strategy', () => {
-  const createStrategy = () =>
+  const createStrategy = (upload?: S3Upload) =>
     new S3Strategy({
       bucket: 'bucket',
       credentials: { accessKeyId: 'access', secretAccessKey: 'secret' },
+      ...(upload ? { upload } : {}),
     });
 
   it('coalesces concurrent credential resolution', async () => {
@@ -130,35 +131,36 @@ describe('S3Strategy', () => {
   });
 
   it('rejects writes when the backend does not support conditional writes', async () => {
-    globalThis.fetch = Object.assign(
-      async () => new Response('conditional writes unsupported', { status: 501 }),
-      { preconnect: originalFetch.preconnect },
-    );
+    const upload: S3Upload = async () => ({
+      status: 501,
+      detail: 'conditional writes unsupported',
+    });
 
     await expect(
-      createStrategy().writeStream('hash', new Blob(['data']).stream(), 4),
+      createStrategy(upload).writeStream('hash', new Blob(['data']).stream(), 4),
     ).rejects.toThrow('does not support conditional writes');
   });
 
   it('forwards cancellation to the outbound S3 upload', async () => {
     let forwardedSignal: AbortSignal | null | undefined;
-    globalThis.fetch = Object.assign(
-      async (_input: string | URL | Request, init?: RequestInit) => {
-        forwardedSignal = init?.signal;
-        return await new Promise<Response>((_resolve, reject) => {
-          if (init?.signal?.aborted) {
-            reject(init.signal.reason);
-            return;
-          }
-          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
-            once: true,
-          });
-        });
-      },
-      { preconnect: originalFetch.preconnect },
-    );
+    const outbound: S3Upload = async (_url, _stream, _contentLength, signal) => {
+      forwardedSignal = signal;
+      return await new Promise<never>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener(
+          'abort',
+          () => {
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      });
+    };
     const controller = new AbortController();
-    const upload = createStrategy().writeStream(
+    const upload = createStrategy(outbound).writeStream(
       'hash',
       new Blob(['data']).stream(),
       4,
@@ -171,22 +173,27 @@ describe('S3Strategy', () => {
     expect(forwardedSignal).toBe(controller.signal);
   });
 
-  it('isolates each streamed upload from the fetch connection pool', async () => {
-    let forwardedHeaders: HeadersInit | undefined;
-    let forwardedKeepalive: boolean | undefined;
-    globalThis.fetch = Object.assign(
-      async (_input: string | URL | Request, init?: RequestInit) => {
-        forwardedHeaders = init?.headers;
-        forwardedKeepalive = init?.keepalive;
-        return new Response(null, { status: 200 });
-      },
-      { preconnect: originalFetch.preconnect },
-    );
+  it('routes each streamed write through the isolated uploader', async () => {
+    let forwardedLength: number | undefined;
+    let forwardedSignal: AbortSignal | undefined;
+    let forwardedStream: ReadableStream<Uint8Array> | undefined;
+    let forwardedUrl = '';
+    const outbound: S3Upload = async (url, stream, contentLength, signal) => {
+      forwardedUrl = url;
+      forwardedStream = stream;
+      forwardedLength = contentLength;
+      forwardedSignal = signal;
+      return { status: 200, detail: '' };
+    };
+    const body = new Blob(['data']).stream();
+    const controller = new AbortController();
 
-    await createStrategy().writeStream('hash', new Blob(['data']).stream(), 4);
+    await createStrategy(outbound).writeStream('hash', body, 4, controller.signal);
 
-    expect(new Headers(forwardedHeaders).get('Connection')).toBe('close');
-    expect(forwardedKeepalive).toBe(false);
+    expect(forwardedUrl).toContain('hash');
+    expect(forwardedStream).toBe(body);
+    expect(forwardedLength).toBe(4);
+    expect(forwardedSignal).toBe(controller.signal);
   });
 
   it('releases the S3 response reader after the streamed body reaches EOF', async () => {

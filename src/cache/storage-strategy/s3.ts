@@ -1,15 +1,26 @@
 import { S3Client, type S3Options } from 'bun';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
 import { CacheEntryExistsError, CacheStorageStrategy } from './storage-strategy.interface';
 
 type StaticCredentials = { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
 type ResolvedCredentials = StaticCredentials & { expiration?: Date };
 type CredentialProvider = () => Promise<ResolvedCredentials>;
+type UploadResult = { status: number; detail: string };
+export type S3Upload = (
+  url: string,
+  stream: ReadableStream<Uint8Array>,
+  contentLength: number,
+  signal?: AbortSignal,
+) => Promise<UploadResult>;
 
 export interface S3StrategyOptions {
   bucket: string;
   region?: string;
   endpoint?: string;
   credentials: StaticCredentials | CredentialProvider;
+  upload?: S3Upload;
 }
 
 const REFRESH_WINDOW_MS = 5 * 60 * 1000;
@@ -20,11 +31,69 @@ export function shouldRefreshCredentials(expiration: number | null, now: number)
   return now >= expiration - REFRESH_WINDOW_MS;
 }
 
+/** Streams one upload over a dedicated, non-pooled HTTP connection. */
+export const isolatedS3Upload: S3Upload = (url, stream, contentLength, signal) =>
+  new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
+    const source = Readable.fromWeb(stream as unknown as Parameters<typeof Readable.fromWeb>[0]);
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    const accept = (result: UploadResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const req = request(
+      target,
+      {
+        method: 'PUT',
+        // agent:false creates a one-shot Agent/socket. Unlike fetch pooling
+        // hints, destroying this request on abort cannot contaminate a later
+        // cache lookup or upload in the Bun process.
+        agent: false,
+        headers: {
+          Connection: 'close',
+          'Content-Length': String(contentLength),
+          'If-None-Match': '*',
+        },
+      },
+      (response) => {
+        let detail = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+          if (detail.length < 512) detail += String(chunk).slice(0, 512 - detail.length);
+        });
+        response.on('end', () => accept({ status: response.statusCode ?? 0, detail }));
+        response.on('aborted', () => fail(new Error('S3 upload response was aborted')));
+        response.on('error', fail);
+      },
+    );
+    function onAbort() {
+      const error = signal?.reason instanceof Error ? signal.reason : new Error('Upload aborted');
+      source.destroy(error);
+      req.destroy(error);
+    }
+    req.on('error', fail);
+    source.on('error', (error) => req.destroy(error));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else source.pipe(req);
+  });
+
 export class S3Strategy implements CacheStorageStrategy {
   readonly #bucket: string;
   readonly #region?: string;
   readonly #endpoint?: string;
   readonly #provider?: CredentialProvider;
+  readonly #upload: S3Upload;
   #client: Bun.S3Client | null = null;
   #expiration: number | null = null;
   #refreshPromise: Promise<void> | null = null;
@@ -33,6 +102,7 @@ export class S3Strategy implements CacheStorageStrategy {
     this.#bucket = options.bucket;
     this.#region = options.region;
     this.#endpoint = options.endpoint;
+    this.#upload = options.upload ?? isolatedS3Upload;
     if (typeof options.credentials === 'function') {
       this.#provider = options.credentials;
     } else {
@@ -156,33 +226,18 @@ export class S3Strategy implements CacheStorageStrategy {
     // Single attempt, deliberately: the body is a one-shot stream, so a retry
     // would have to buffer the whole upload, and Nx treats remote-cache
     // failures as soft (the client falls back to a cache miss).
-    const response = await fetch(client.presign(hash, { method: 'PUT' }), {
-      method: 'PUT',
-      // Disable pooling before the upload starts. Connection: close alone is a
-      // response-time hint; if the client disconnects first, Bun can otherwise
-      // leave the interrupted socket in the shared origin pool.
-      keepalive: false,
-      headers: {
-        // Bun can retain an unusable pooled connection after a streamed PUT is
-        // aborted. Isolate uploads so a canceled CI job cannot poison later
-        // cache writes; the in-cluster TCP setup cost is negligible.
-        Connection: 'close',
-        'Content-Length': String(contentLength),
-        'If-None-Match': '*',
-      },
-      body: stream,
+    const response = await this.#upload(
+      client.presign(hash, { method: 'PUT' }),
+      stream,
+      contentLength,
       signal,
-    });
+    );
 
-    if (response.ok) {
-      await response.body?.cancel();
-      return;
-    }
+    if (response.status >= 200 && response.status < 300) return;
     if (response.status === 409 || response.status === 412) {
-      await response.body?.cancel();
       throw new CacheEntryExistsError(hash);
     }
-    const detail = (await response.text().catch(() => '')).slice(0, 512);
+    const detail = response.detail.slice(0, 512);
     if (response.status === 501) {
       throw new Error(
         `S3 write failed with HTTP 501: the backend does not support conditional writes (If-None-Match), which remotecache requires for append-only uploads. Use AWS S3 or another backend with S3 conditional-write support — see the storage-strategies guide. Backend response: ${detail}`,
