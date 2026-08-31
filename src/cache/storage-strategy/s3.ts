@@ -72,7 +72,24 @@ export class S3Strategy implements CacheStorageStrategy {
   }
 
   async exists(hash: string): Promise<boolean> {
-    return (await this.#getClient()).exists(hash);
+    const client = await this.#getClient();
+    // Some S3-compatible backends (notably SeaweedFS) close the connection
+    // when a HEAD miss tries to include an XML error body. Bun's S3 exists()
+    // uses HEAD, so a normal Nx cache miss can otherwise stall until the HTTP
+    // idle timeout. A one-byte ranged GET is portable, cheap, and keeps the
+    // missing-object response on the regular GET error path.
+    const response = await fetch(client.presign(hash, { method: 'GET' }), {
+      method: 'GET',
+      headers: { Range: 'bytes=0-0' },
+    });
+
+    if (response.ok) {
+      await response.arrayBuffer();
+      return true;
+    }
+    const detail = (await response.text().catch(() => '')).slice(0, 512);
+    if (response.status === 404) return false;
+    throw new Error(`S3 existence probe failed with HTTP ${response.status}: ${detail}`);
   }
 
   async checkReady(): Promise<void> {
